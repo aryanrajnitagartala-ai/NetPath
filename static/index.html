@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NetPath - Network Topology Optimizer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/vis-network.min.js"></script>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #0f1117; color: #e5e7eb; }
+  header { padding: 16px 24px; background: #161a23; border-bottom: 1px solid #262b38; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; color: #8b93a7; font-size: 13px; }
+  .layout { display: flex; height: calc(100vh - 64px); }
+  #network { flex: 1; }
+  .panel { width: 340px; padding: 16px; background: #161a23; overflow-y: auto; border-left: 1px solid #262b38; }
+  .panel h3 { font-size: 13px; text-transform: uppercase; color: #8b93a7; margin: 18px 0 8px; }
+  select, button { width: 100%; padding: 8px; margin-bottom: 8px; border-radius: 6px; border: 1px solid #262b38; background: #1c2230; color: #e5e7eb; }
+  button { cursor: pointer; background: #3b82f6; border: none; font-weight: 600; }
+  button.secondary { background: #262b38; }
+  .stat { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+  .stat span:last-child { color: #60a5fa; font-weight: 600; }
+  #result { font-size: 13px; line-height: 1.5; white-space: pre-wrap; background: #1c2230; padding: 10px; border-radius: 6px; margin-top: 6px; min-height: 40px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌐 NetPath — Network Topology Optimizer & Routing Engine</h1>
+  <p>Graph-based routing (Dijkstra), minimum-cost backbone design (Kruskal MST), and single-point-of-failure detection (Tarjan articulation points)</p>
+</header>
+<div class="layout">
+  <div id="network"></div>
+  <div class="panel">
+    <h3>Topology</h3>
+    <div class="stat"><span>Nodes</span><span id="nodeCount">-</span></div>
+    <div class="stat"><span>Links</span><span id="edgeCount">-</span></div>
+
+    <h3>Shortest Path</h3>
+    <select id="srcSelect"></select>
+    <select id="tgtSelect"></select>
+    <button onclick="findRoute()">Compute Shortest Path</button>
+    <div id="routeResult" class="result"></div>
+
+    <h3>Minimum-Cost Backbone</h3>
+    <button class="secondary" onclick="showBackbone()">Highlight MST Backbone</button>
+
+    <h3>Resilience Analysis</h3>
+    <button class="secondary" onclick="showResilience()">Find Single Points of Failure</button>
+    <div id="result" class="result">Load the topology to begin.</div>
+  </div>
+</div>
+
+<script>
+let network, allNodes, allEdges, nodesDataSet, edgesDataSet;
+
+async function loadTopology() {
+  const res = await fetch('/topology');
+  const data = await res.json();
+  document.getElementById('nodeCount').innerText = data.node_count;
+  document.getElementById('edgeCount').innerText = data.edge_count;
+
+  const colorFor = (id) => id.startsWith('core') ? '#f87171' : id.startsWith('dist') ? '#fbbf24' : '#60a5fa';
+
+  allNodes = data.nodes.map(n => ({ id: n, label: n, color: colorFor(n), font: { color: '#e5e7eb', size: 10 } }));
+  allEdges = data.edges.map(e => ({ from: e.a, to: e.b, color: '#3a4152', width: 1 }));
+
+  nodesDataSet = new vis.DataSet(allNodes);
+  edgesDataSet = new vis.DataSet(allEdges);
+
+  network = new vis.Network(document.getElementById('network'), { nodes: nodesDataSet, edges: edgesDataSet }, {
+    physics: { stabilization: true, barnesHut: { gravitationalConstant: -3000, springLength: 60 } },
+    nodes: { shape: 'dot', size: 8 },
+  });
+
+  const srcSel = document.getElementById('srcSelect');
+  const tgtSel = document.getElementById('tgtSelect');
+  data.nodes.forEach(n => {
+    srcSel.innerHTML += `<option value="${n}">${n}</option>`;
+    tgtSel.innerHTML += `<option value="${n}">${n}</option>`;
+  });
+}
+
+async function findRoute() {
+  const source = document.getElementById('srcSelect').value;
+  const target = document.getElementById('tgtSelect').value;
+  const res = await fetch('/route', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({source, target}) });
+  const data = await res.json();
+  if (!res.ok) { document.getElementById('result').innerText = data.detail; return; }
+
+  edgesDataSet.update(allEdges.map(e => ({ id: e.id, color: '#3a4152', width: 1 })));
+  nodesDataSet.update(allNodes.map(n => ({ id: n.id, color: n.color })));
+
+  for (let i = 0; i < data.path.length - 1; i++) {
+    const a = data.path[i], b = data.path[i+1];
+    const match = edgesDataSet.get({ filter: e => (e.from === a && e.to === b) || (e.from === b && e.to === a) });
+    match.forEach(e => edgesDataSet.update({ id: e.id, color: '#34d399', width: 4 }));
+  }
+  data.path.forEach(n => nodesDataSet.update({ id: n, color: '#34d399' }));
+
+  document.getElementById('result').innerText =
+    `Path: ${data.path.join(' → ')}\nHops: ${data.hops}\nTotal latency: ${data.total_latency_ms} ms`;
+}
+
+async function showBackbone() {
+  const res = await fetch('/backbone');
+  const data = await res.json();
+  edgesDataSet.update(allEdges.map(e => ({ id: e.id, color: '#3a4152', width: 1 })));
+  data.edges.forEach(be => {
+    const match = edgesDataSet.get({ filter: e => (e.from === be.a && e.to === be.b) || (e.from === be.b && e.to === be.a) });
+    match.forEach(e => edgesDataSet.update({ id: e.id, color: '#fbbf24', width: 3 }));
+  });
+  document.getElementById('result').innerText =
+    `Minimum-cost backbone: ${data.edge_count} links, total cost ${data.total_cost}`;
+}
+
+async function showResilience() {
+  const res = await fetch('/resilience');
+  const data = await res.json();
+  nodesDataSet.update(allNodes.map(n => ({ id: n.id, color: n.color })));
+  data.single_points_of_failure.forEach(n => nodesDataSet.update({ id: n, color: '#ef4444' }));
+
+  let text = `${data.count} single point(s) of failure found:\n`;
+  data.impact.slice(0, 8).forEach(d => {
+    text += `  ${d.node} → isolates ${d.nodes_isolated_if_removed} node(s)\n`;
+  });
+  document.getElementById('result').innerText = text;
+}
+
+loadTopology();
+</script>
+</body>
+</html>
